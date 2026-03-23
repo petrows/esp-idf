@@ -52,6 +52,13 @@ extern "C" {
 #define CONFIG_EXAMPLE_STRIP_LED_NUMBER 1
 
 /**
+* @brief color light driver init, be invoked where you want to use color light
+*
+* @param power power on/off
+*/
+void light_driver_init(bool power);
+
+/**
 * @brief Set light power (on/off).
 *
 * @param  power  The light power to be set
@@ -59,11 +66,25 @@ extern "C" {
 void light_driver_set_power(bool power);
 
 /**
-* @brief color light driver init, be invoked where you want to use color light
+* @brief Set light brightness level.
 *
-* @param power power on/off
+* @param level  Brightness level (0-254, ZCL range)
 */
-void light_driver_init(bool power);
+void light_driver_set_level(uint8_t level);
+
+/**
+* @brief Set light color hue.
+*
+* @param hue  Hue value (0-254, ZCL range maps to 0-360 degrees)
+*/
+void light_driver_set_color_hue(uint8_t hue);
+
+/**
+* @brief Set light color saturation.
+*
+* @param saturation  Saturation value (0-254, ZCL range)
+*/
+void light_driver_set_color_saturation(uint8_t saturation);
 
 #ifdef __cplusplus
 } // extern "C"

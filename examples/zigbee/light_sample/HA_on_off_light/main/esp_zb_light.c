@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier:  LicenseRef-Included
  *
- * Zigbee HA_on_off_light Example
+ * Zigbee HA_color_dimmable_light Example
  *
  * This example code is in the Public Domain (or CC0 licensed, at your option.)
  *
@@ -24,7 +24,8 @@
 #error Define ZB_ED_ROLE in idf.py menuconfig to compile light (End Device) source code.
 #endif
 
-static const char *TAG = "ESP_ZB_ON_OFF_LIGHT";
+static const char *TAG = "ESP_ZB_COLOR_LIGHT";
+
 /********************* Define functions **************************/
 static esp_err_t deferred_driver_init(void)
 {
@@ -59,7 +60,6 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                 ESP_LOGI(TAG, "Device rebooted");
             }
         } else {
-            /* commissioning failed */
             ESP_LOGW(TAG, "Failed to initialize Zigbee stack (status: %s)", esp_err_to_name(err_status));
         }
         break;
@@ -86,21 +86,54 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
 static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t *message)
 {
     esp_err_t ret = ESP_OK;
-    bool light_state = 0;
 
     ESP_RETURN_ON_FALSE(message, ESP_FAIL, TAG, "Empty message");
-    ESP_RETURN_ON_FALSE(message->info.status == ESP_ZB_ZCL_STATUS_SUCCESS, ESP_ERR_INVALID_ARG, TAG, "Received message: error status(%d)",
-                        message->info.status);
-    ESP_LOGI(TAG, "Received message: endpoint(%d), cluster(0x%x), attribute(0x%x), data size(%d)", message->info.dst_endpoint, message->info.cluster,
+    ESP_RETURN_ON_FALSE(message->info.status == ESP_ZB_ZCL_STATUS_SUCCESS, ESP_ERR_INVALID_ARG, TAG,
+                        "Received message: error status(%d)", message->info.status);
+    ESP_LOGI(TAG, "Received message: endpoint(%d), cluster(0x%x), attribute(0x%x), data size(%d)",
+             message->info.dst_endpoint, message->info.cluster,
              message->attribute.id, message->attribute.data.size);
-    if (message->info.dst_endpoint == HA_ESP_LIGHT_ENDPOINT) {
-        if (message->info.cluster == ESP_ZB_ZCL_CLUSTER_ID_ON_OFF) {
-            if (message->attribute.id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID && message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_BOOL) {
-                light_state = message->attribute.data.value ? *(bool *)message->attribute.data.value : light_state;
-                ESP_LOGI(TAG, "Light sets to %s", light_state ? "On" : "Off");
-                light_driver_set_power(light_state);
-            }
+
+    if (message->info.dst_endpoint != HA_ESP_LIGHT_ENDPOINT) {
+        return ret;
+    }
+
+    switch (message->info.cluster) {
+    case ESP_ZB_ZCL_CLUSTER_ID_ON_OFF:
+        if (message->attribute.id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID &&
+            message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_BOOL) {
+            bool power = message->attribute.data.value ? *(bool *)message->attribute.data.value : false;
+            ESP_LOGI(TAG, "Light power: %s", power ? "On" : "Off");
+            light_driver_set_power(power);
         }
+        break;
+
+    case ESP_ZB_ZCL_CLUSTER_ID_LEVEL_CONTROL:
+        if (message->attribute.id == ESP_ZB_ZCL_ATTR_LEVEL_CONTROL_CURRENT_LEVEL_ID &&
+            message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U8) {
+            uint8_t level = message->attribute.data.value ? *(uint8_t *)message->attribute.data.value : 0;
+            ESP_LOGI(TAG, "Light level: %d", level);
+            light_driver_set_level(level);
+        }
+        break;
+
+    case ESP_ZB_ZCL_CLUSTER_ID_COLOR_CONTROL:
+        if (message->attribute.id == ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_HUE_ID &&
+            message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U8) {
+            uint8_t hue = message->attribute.data.value ? *(uint8_t *)message->attribute.data.value : 0;
+            ESP_LOGI(TAG, "Light hue: %d", hue);
+            light_driver_set_color_hue(hue);
+        } else if (message->attribute.id == ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_SATURATION_ID &&
+                   message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U8) {
+            uint8_t saturation = message->attribute.data.value ? *(uint8_t *)message->attribute.data.value : 0;
+            ESP_LOGI(TAG, "Light saturation: %d", saturation);
+            light_driver_set_color_saturation(saturation);
+        }
+        break;
+
+    default:
+        ESP_LOGD(TAG, "Unhandled cluster 0x%x", message->info.cluster);
+        break;
     }
     return ret;
 }
@@ -124,15 +157,18 @@ static void esp_zb_task(void *pvParameters)
     /* initialize Zigbee stack */
     esp_zb_cfg_t zb_nwk_cfg = ESP_ZB_ZED_CONFIG();
     esp_zb_init(&zb_nwk_cfg);
-    esp_zb_on_off_light_cfg_t light_cfg = ESP_ZB_DEFAULT_ON_OFF_LIGHT_CONFIG();
-    esp_zb_ep_list_t *esp_zb_on_off_light_ep = esp_zb_on_off_light_ep_create(HA_ESP_LIGHT_ENDPOINT, &light_cfg);
+
+    /* Color dimmable light: OnOff + Level + Color (Hue/Saturation) clusters */
+    esp_zb_color_dimmable_light_cfg_t light_cfg = ESP_ZB_DEFAULT_COLOR_DIMMABLE_LIGHT_CONFIG();
+    esp_zb_ep_list_t *esp_zb_light_ep = esp_zb_color_dimmable_light_ep_create(HA_ESP_LIGHT_ENDPOINT, &light_cfg);
+
     zcl_basic_manufacturer_info_t info = {
         .manufacturer_name = ESP_MANUFACTURER_NAME,
         .model_identifier = ESP_MODEL_IDENTIFIER,
     };
+    esp_zcl_utility_add_ep_basic_manufacturer_info(esp_zb_light_ep, HA_ESP_LIGHT_ENDPOINT, &info);
 
-    esp_zcl_utility_add_ep_basic_manufacturer_info(esp_zb_on_off_light_ep, HA_ESP_LIGHT_ENDPOINT, &info);
-    esp_zb_device_register(esp_zb_on_off_light_ep);
+    esp_zb_device_register(esp_zb_light_ep);
     esp_zb_core_action_handler_register(zb_action_handler);
     esp_zb_set_primary_network_channel_set(ESP_ZB_PRIMARY_CHANNEL_MASK);
     ESP_ERROR_CHECK(esp_zb_start(false));

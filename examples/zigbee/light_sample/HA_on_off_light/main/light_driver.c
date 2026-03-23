@@ -39,12 +39,50 @@
 #include "led_strip.h"
 #include "light_driver.h"
 
-static led_strip_handle_t s_led_strip;
-static uint8_t s_red = 255, s_green = 255, s_blue = 255;
+static const char *TAG = "LIGHT_DRIVER";
 
-void light_driver_set_power(bool power)
+static led_strip_handle_t s_led_strip;
+static bool    s_power      = false;
+static uint8_t s_hue        = 0;       /* ZCL hue: 0-254 */
+static uint8_t s_saturation = 0;       /* ZCL saturation: 0-254 */
+static uint8_t s_level      = 254;     /* ZCL level: 0-254 */
+
+/* Convert HSV (hue 0-360, sat 0-255, val 0-255) to RGB (each 0-255) */
+static void hsv_to_rgb(uint16_t h, uint8_t s, uint8_t v,
+                       uint8_t *r, uint8_t *g, uint8_t *b)
 {
-    ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, 0, s_red * power, s_green * power, s_blue * power));
+    if (s == 0) {
+        *r = *g = *b = v;
+        return;
+    }
+    uint16_t region  = h / 60;
+    uint16_t rem     = (h - region * 60) * 255 / 60;
+    uint8_t  p       = (uint32_t)v * (255 - s) / 255;
+    uint8_t  q       = (uint32_t)v * (255 - ((uint32_t)s * rem) / 255) / 255;
+    uint8_t  t_val   = (uint32_t)v * (255 - ((uint32_t)s * (255 - rem)) / 255) / 255;
+    switch (region) {
+    case 0:  *r = v;     *g = t_val; *b = p;     break;
+    case 1:  *r = q;     *g = v;     *b = p;     break;
+    case 2:  *r = p;     *g = v;     *b = t_val; break;
+    case 3:  *r = p;     *g = q;     *b = v;     break;
+    case 4:  *r = t_val; *g = p;     *b = v;     break;
+    default: *r = v;     *g = p;     *b = q;     break;
+    }
+}
+
+static void light_driver_update(void)
+{
+    uint8_t r = 0, g = 0, b = 0;
+    if (s_power) {
+        /* ZCL hue 0-254 → degrees 0-360 */
+        uint16_t hue_deg = (uint16_t)s_hue * 360 / 254;
+        /* ZCL level 0-254 → brightness 0-255 */
+        uint8_t brightness = s_level;
+        hsv_to_rgb(hue_deg, s_saturation, brightness, &r, &g, &b);
+    }
+    ESP_LOGD(TAG, "LED update: power=%d hue=%d sat=%d level=%d -> r=%d g=%d b=%d",
+             s_power, s_hue, s_saturation, s_level, r, g, b);
+    ESP_ERROR_CHECK(led_strip_set_pixel(s_led_strip, 0, r, g, b));
     ESP_ERROR_CHECK(led_strip_refresh(s_led_strip));
 }
 
@@ -58,5 +96,30 @@ void light_driver_init(bool power)
         .resolution_hz = 10 * 1000 * 1000, // 10MHz
     };
     ESP_ERROR_CHECK(led_strip_new_rmt_device(&led_strip_conf, &rmt_conf, &s_led_strip));
-    light_driver_set_power(power);
+    s_power = power;
+    light_driver_update();
+}
+
+void light_driver_set_power(bool power)
+{
+    s_power = power;
+    light_driver_update();
+}
+
+void light_driver_set_level(uint8_t level)
+{
+    s_level = level;
+    light_driver_update();
+}
+
+void light_driver_set_color_hue(uint8_t hue)
+{
+    s_hue = hue;
+    light_driver_update();
+}
+
+void light_driver_set_color_saturation(uint8_t saturation)
+{
+    s_saturation = saturation;
+    light_driver_update();
 }
