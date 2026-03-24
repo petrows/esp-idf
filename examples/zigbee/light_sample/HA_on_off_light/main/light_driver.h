@@ -38,6 +38,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -85,6 +86,39 @@ void light_driver_set_color_hue(uint8_t hue);
 * @param saturation  Saturation value (0-254, ZCL range)
 */
 void light_driver_set_color_saturation(uint8_t saturation);
+
+/**
+* @brief Set light color using CIE 1931 XY chromaticity coordinates.
+*
+* @param x  CIE X value (ZCL range 0-65279, represents 0.0-0.9961)
+* @param y  CIE Y value (ZCL range 0-65279, represents 0.0-0.9961)
+*/
+void light_driver_set_color_xy(uint16_t x, uint16_t y);
+
+/**
+* @brief Get current CIE X color value.
+* @return ZCL CIE X value (0-65279)
+*/
+uint16_t light_driver_get_color_x(void);
+
+/**
+* @brief Get current CIE Y color value.
+* @return ZCL CIE Y value (0-65279)
+*/
+uint16_t light_driver_get_color_y(void);
+
+/**
+* @brief Start LED blinking to indicate network search/join.
+*        Overrides the current light state visually until stopped.
+*
+* @param period_ms  Full blink period in milliseconds (on + off).
+*/
+void light_driver_blink_start(uint32_t period_ms);
+
+/**
+* @brief Stop LED blinking and restore the actual light state.
+*/
+void light_driver_blink_stop(void);
 
 #ifdef __cplusplus
 } // extern "C"

@@ -13,18 +13,22 @@
  */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "ha/esp_zigbee_ha_standard.h"
 #include "zcl_utility.h"
 #include "esp_zb_light.h"
+#include "button.h"
 
 #if !defined ZB_ED_ROLE
 #error Define ZB_ED_ROLE in idf.py menuconfig to compile light (End Device) source code.
 #endif
 
 static const char *TAG = "ESP_ZB_COLOR_LIGHT";
+
+static bool s_light_power = false; /* local on/off state, kept in sync with ZCL */
 
 /********************* Define functions **************************/
 static esp_err_t deferred_driver_init(void)
@@ -51,10 +55,10 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
     case ESP_ZB_BDB_SIGNAL_DEVICE_FIRST_START:
     case ESP_ZB_BDB_SIGNAL_DEVICE_REBOOT:
         if (err_status == ESP_OK) {
-            ESP_LOGI(TAG, "Deferred driver initialization %s", deferred_driver_init() ? "failed" : "successful");
             ESP_LOGI(TAG, "Device started up in %s factory-reset mode", esp_zb_bdb_is_factory_new() ? "" : "non");
             if (esp_zb_bdb_is_factory_new()) {
                 ESP_LOGI(TAG, "Start network steering");
+                light_driver_blink_start(500);
                 esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
             } else {
                 ESP_LOGI(TAG, "Device rebooted");
@@ -65,6 +69,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
         break;
     case ESP_ZB_BDB_SIGNAL_STEERING:
         if (err_status == ESP_OK) {
+            light_driver_blink_stop();
             esp_zb_ieee_addr_t extended_pan_id;
             esp_zb_get_extended_pan_id(extended_pan_id);
             ESP_LOGI(TAG, "Joined network successfully (Extended PAN ID: %02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x, PAN ID: 0x%04hx, Channel:%d, Short Address: 0x%04hx)",
@@ -104,6 +109,7 @@ static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t 
             message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_BOOL) {
             bool power = message->attribute.data.value ? *(bool *)message->attribute.data.value : false;
             ESP_LOGI(TAG, "Light power: %s", power ? "On" : "Off");
+            s_light_power = power;
             light_driver_set_power(power);
         }
         break;
@@ -128,6 +134,16 @@ static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t 
             uint8_t saturation = message->attribute.data.value ? *(uint8_t *)message->attribute.data.value : 0;
             ESP_LOGI(TAG, "Light saturation: %d", saturation);
             light_driver_set_color_saturation(saturation);
+        } else if (message->attribute.id == ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_X_ID &&
+                   message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U16) {
+            uint16_t color_x = message->attribute.data.value ? *(uint16_t *)message->attribute.data.value : 0;
+            ESP_LOGI(TAG, "Light color X: %d", color_x);
+            light_driver_set_color_xy(color_x, light_driver_get_color_y());
+        } else if (message->attribute.id == ESP_ZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_Y_ID &&
+                   message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U16) {
+            uint16_t color_y = message->attribute.data.value ? *(uint16_t *)message->attribute.data.value : 0;
+            ESP_LOGI(TAG, "Light color Y: %d", color_y);
+            light_driver_set_color_xy(light_driver_get_color_x(), color_y);
         }
         break;
 
@@ -150,6 +166,35 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
         break;
     }
     return ret;
+}
+
+static void button_task(void *pvParameters)
+{
+    QueueHandle_t queue = (QueueHandle_t)pvParameters;
+    button_event_t evt;
+
+    while (xQueueReceive(queue, &evt, portMAX_DELAY)) {
+        switch (evt) {
+        case BUTTON_EVT_SHORT_PRESS:
+            s_light_power = !s_light_power;
+            ESP_LOGI(TAG, "Button short press: light %s", s_light_power ? "On" : "Off");
+            light_driver_set_power(s_light_power);
+            /* Update ZCL on/off attribute so coordinator sees the new state */
+            if (esp_zb_lock_acquire(portMAX_DELAY)) {
+                esp_zb_zcl_set_attribute_val(HA_ESP_LIGHT_ENDPOINT,
+                    ESP_ZB_ZCL_CLUSTER_ID_ON_OFF, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                    ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID, &s_light_power, false);
+                esp_zb_lock_release();
+            }
+            break;
+
+        case BUTTON_EVT_LONG_PRESS:
+            ESP_LOGI(TAG, "Button long press: factory reset");
+            /* esp_zb_factory_reset() erases zb_storage and calls esp_restart() */
+            esp_zb_factory_reset();
+            break;
+        }
+    }
 }
 
 static void esp_zb_task(void *pvParameters)
@@ -183,5 +228,12 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_zb_platform_config(&config));
+
+    ESP_LOGI(TAG, "Deferred driver initialization %s", deferred_driver_init() ? "failed" : "successful");
+
+    QueueHandle_t button_queue = xQueueCreate(5, sizeof(button_event_t));
+    button_start(button_queue);
+    xTaskCreate(button_task, "button_handler", 3072, button_queue, 5, NULL);
+
     xTaskCreate(esp_zb_task, "Zigbee_main", 4096, NULL, 5, NULL);
 }
